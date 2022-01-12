@@ -35,59 +35,79 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  ******************************************************************************/
 
-#ifndef _UTILITIES_H_
-#define _UTILITIES_H_
-
 #include "types.h"
 
-//Printing values in Little Endian
-void print_LE(IN const uint64_t *in, IN const uint32_t bits_num);
+//////////////////////////////////////////
+//      Conversion functions.
+/////////////////////////////////////////
 
-//Printing values in Big Endian
-void print_BE(IN const uint64_t *in, IN const uint32_t bits_num);
-
-//Printing number is required only in verbose level 2 or above.
-#if VERBOSE==2
-#ifdef PRINT_IN_BE
-//Print in Big Endian
-#define print(in, bits_num) print_BE(in, bits_num)
-#else
-//Print in Little Endian
-#define print(in, bits_num) print_LE(in, bits_num)
-#endif
-#else
-//No prints at all
-#define print(in, bits_num)
-#endif
-
-//Comparing value in a constant time manner.
-_INLINE_ uint32_t safe_cmp(IN const uint8_t* a,
-        IN const uint8_t* b,
-        IN const uint32_t size)
+void convert2compact(OUT uint32_t out[DV], IN const uint8_t in[R_BITS])
 {
-    volatile uint8_t res = 0;
+    uint32_t idx=0;
 
-    for(uint32_t i=0; i < size; ++i)
+    for (uint32_t i = 0; i < R_SIZE; i++)
     {
-        res |= (a[i] ^ b[i]);
-    }
+        for (uint32_t j = 0; j < 8ULL; j++)
+        {
+            if ((i*8 + j) == R_BITS)
+            {
+                break;
+            }
 
-    return (res == 0);
+            if ((in[i] >> j) & 1)
+            {
+                out[idx++] = i*8+j;
+            }
+        }
+    }
 }
 
-//BSR returns ceil(log2(val))
-_INLINE_ uint8_t bit_scan_reverse(uint64_t val)
+// convert a sequence of uint8_t elements which fully uses all 8-bits of an uint8_t element to
+// a sequence of uint8_t which uses just a single bit per byte (either 0 or 1).
+int convertByteToBinary(uint8_t* out, uint8_t * in, uint32_t length)
 {
-    //index is always smaller than 64.
-    uint8_t index = 0;
+    uint32_t paddingLen = length % 8;
+    uint32_t numBytes = (paddingLen == 0) ? (length / 8) : (1 + (length/8));
 
-    while(val != 0)
+    for (uint32_t i = 0; i < numBytes; i++)
     {
-        val >>= 1;
-        index++;
-    }
+        for (uint32_t j = 0; j < 8ULL; j++)
+        {
+            if ((i*8 + j) == length)
+            {
+                break;
+            }
 
-    return index;
+            if ((in[i] >> j) & 1)
+            {
+                out[i*8+j] = 1;
+            }
+        }
+    }
+    return 0;
 }
 
-#endif //_UTILITIES_H_
+// convert a sequence of uint8_t elements which uses just a single bit per byte (either 0 or 1) to
+// a sequence of uint8_t which fully uses all 8-bits of an uint8_t element.
+int convertBinaryToByte(uint8_t * out, const uint8_t* in, uint32_t length)
+{
+    uint32_t paddingLen = length % 8;
+    uint32_t numBytes = (paddingLen == 0) ? (length / 8) : (1 + (length/8));
+
+    for (uint32_t i = 0; i < numBytes; i++)
+    {
+        for (uint32_t j = 0; j < 8; j++)
+        {
+            if ((i*8 + j) == length)
+            {
+                break;
+            }
+
+            if (in[i*8 + j])
+            {
+                out[i] |= (uint8_t)(1 << j);
+            }
+        }
+    }
+    return 0;
+}

@@ -1,286 +1,339 @@
-/* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0"
+/******************************************************************************
+ * BIKE -- Bit Flipping Key Encapsulation
  *
- * Written by Nir Drucker, Shay Gueron, and Dusan Kostic,
- * AWS Cryptographic Algorithms Group.
- */
+ * Copyright (c) 2021 Nir Drucker, Shay Gueron, Rafael Misoczki, Tobias Oder,
+ * Tim Gueneysu, Jan Richter-Brockmann.
+ * Contact: drucker.nir@gmail.com, shay.gueron@gmail.com,
+ * rafaelmisoczki@google.com, tobias.oder@rub.de, tim.gueneysu@rub.de,
+ * jan.richter-brockmann@rub.de.
+ *
+ * Permission to use this code for BIKE is granted.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * * Redistributions of source code must retain the above copyright notice,
+ *   this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the distribution.
+ *
+ * * The names of the contributors may not be used to endorse or promote
+ *   products derived from this software without specific prior written
+ *   permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ""AS IS"" AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS CORPORATION OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
 
+#include <stdio.h>
+#include <string.h>
+
+#include "hash_wrapper.h"
+#include "openssl_utils.h"
+#include "ntl.h"
 #include "decode.h"
-#include "gf2x.h"
 #include "sampling.h"
-#include "sha.h"
+#include "kem.h"
+#include "conversions.h"
+#include "shake_prng.h"
 
-// m_t and seed_t have the same size and thus can be considered
-// to be of the same type. However, for security reasons we distinguish
-// these types, even on the costs of small extra complexity.
-_INLINE_ void convert_seed_to_m_type(OUT m_t *m, IN const seed_t *seed)
+// Function H. It uses the extract-then-expand paradigm based on SHA384 and
+// AES256-CTR PRNG to produce e from m.
+_INLINE_ status_t functionH(
+        OUT uint8_t * e,
+        IN const uint8_t * m)
 {
-  bike_static_assert(sizeof(*m) == sizeof(*seed), m_size_eq_seed_size);
-  bike_memcpy(m->raw, seed->raw, sizeof(*m));
+    status_t res = SUCCESS;
+
+    // format seed as a 32-bytes input:
+    seed_t seed_for_hash;
+    memcpy(seed_for_hash.raw, m, ELL_SIZE);
+
+    // use the seed to generate sparse error vector e:
+    DMSG("    Generating random error.\n");
+    shake256_prng_state_t prng_state = {0};
+    shake256_init(seed_for_hash.raw, ELL_SIZE, &prng_state);
+    res = generate_sparse_rep_keccak(e, T1, N_BITS, &prng_state); CHECK_STATUS(res);
+
+    EXIT:
+    DMSG("  Exit functionH.\n");
+    return res;
 }
 
-_INLINE_ void convert_m_to_seed_type(OUT seed_t *seed, IN const m_t *m)
+// Function L. Computes L(e0 || e1)
+_INLINE_ status_t functionL(
+        OUT uint8_t * output,
+        IN const uint8_t * e)
 {
-  bike_static_assert(sizeof(*m) == sizeof(*seed), m_size_eq_seed_size);
-  bike_memcpy(seed->raw, m->raw, sizeof(*seed));
+    status_t res = SUCCESS;
+    uint8_t hash_value[SHA384_HASH_SIZE] = {0};
+    uint8_t e_split[2 * R_SIZE] = {0};
+
+    ntl_split_polynomial(e_split, &e_split[R_SIZE], e);
+
+    // select hash function
+    sha3_384(hash_value, e_split, 2*R_SIZE);
+
+    memcpy(output, hash_value, ELL_SIZE);
+
+    DMSG("  Exit functionL.\n");
+    return res;
 }
 
-// (e0, e1) = H(m)
-_INLINE_ ret_t function_h(OUT pad_e_t *e, IN const m_t *m)
+// Function K. Computes K(m || c0 || c1).
+_INLINE_ status_t functionK(
+        OUT uint8_t * output,
+        IN const uint8_t * m,
+        IN const uint8_t * c0,
+        IN const uint8_t * c1)
 {
-  DEFER_CLEANUP(seed_t seed = {0}, seed_cleanup);
+    status_t res = SUCCESS;
+    sha384_hash_t large_hash = {0};
 
-  convert_m_to_seed_type(&seed, m);
-  return generate_error_vector(e, &seed);
+    // preparing buffer with: [m || c0 || c1]
+    uint8_t tmp1[ELL_SIZE + 2*R_SIZE] = {0};
+    memcpy(tmp1, m, ELL_SIZE);
+    memcpy(tmp1 + ELL_SIZE, c0, R_SIZE);
+    memcpy(tmp1 + ELL_SIZE + R_SIZE, c1, ELL_SIZE);
+
+    // shared secret =  K(m || c0 || c1)
+    // select hash function
+    sha3_384(large_hash.raw, tmp1, 2*ELL_SIZE + R_SIZE);
+    memcpy(output, large_hash.raw, ELL_SIZE);
+  
+    DMSG("  Exit functionK.\n");
+    return res;
 }
 
-// out = L(e)
-_INLINE_ ret_t function_l(OUT m_t *out, IN const pad_e_t *e)
+_INLINE_ status_t compute_syndrome(OUT syndrome_t* syndrome,
+        IN const ct_t* ct,
+        IN const sk_t* sk)
 {
-  DEFER_CLEANUP(sha_dgst_t dgst = {0}, sha_dgst_cleanup);
-  DEFER_CLEANUP(e_t tmp, e_cleanup);
+    status_t res = SUCCESS;
+    uint8_t s_tmp_bytes[R_BITS] = {0};
+    uint8_t s0[R_SIZE] = {0};
 
-  // Take the padding away
-  tmp.val[0] = e->val[0].val;
-  tmp.val[1] = e->val[1].val;
+    // syndrome: s = c0*h0
+    ntl_mod_mul(s0, sk->val0, ct->val0);
 
-  GUARD(sha(&dgst, sizeof(tmp), (uint8_t *)&tmp));
+    // store the syndrome in a bit array
+    convertByteToBinary(s_tmp_bytes, s0, R_BITS);
+    transpose(syndrome->raw, s_tmp_bytes);
 
-  // Truncate the SHA384 digest to a 256-bits m_t
-  bike_static_assert(sizeof(dgst) >= sizeof(*out), dgst_size_lt_m_size);
-  bike_memcpy(out->raw, dgst.u.raw, sizeof(*out));
+    DMSG("  Exit compute_syndrome.\n");
 
-  return SUCCESS;
+    return res;
 }
 
-// Generate the Shared Secret K(m, c0, c1)
-_INLINE_ ret_t function_k(OUT ss_t *out, IN const m_t *m, IN const ct_t *ct)
-{
-  DEFER_CLEANUP(func_k_t tmp, func_k_cleanup);
-  DEFER_CLEANUP(sha_dgst_t dgst = {0}, sha_dgst_cleanup);
-
-  // Copy every element, padded to the nearest byte
-  tmp.m  = *m;
-  tmp.c0 = ct->c0;
-  tmp.c1 = ct->c1;
-
-  GUARD(sha(&dgst, sizeof(tmp), (uint8_t *)&tmp));
-
-  // Truncate the SHA384 digest to a 256-bits value
-  // to subsequently use it as a seed.
-  bike_static_assert(sizeof(dgst) >= sizeof(*out), dgst_size_lt_out_size);
-  bike_memcpy(out->raw, dgst.u.raw, sizeof(*out));
-
-  return SUCCESS;
-}
-
-_INLINE_ ret_t encrypt(OUT ct_t *ct,
-                       IN const pad_e_t *e,
-                       IN const pk_t *pk,
-                       IN const m_t *m)
-{
-  // Pad the public key and the ciphertext
-  pad_r_t p_ct = {0};
-  pad_r_t p_pk = {0};
-  p_pk.val     = *pk;
-
-  // Generate the ciphertext
-  // ct = pk * e1 + e0
-  gf2x_mod_mul(&p_ct, &e->val[1], &p_pk);
-  gf2x_mod_add(&p_ct, &p_ct, &e->val[0]);
-
-  ct->c0 = p_ct.val;
-
-  // c1 = L(e0, e1)
-  GUARD(function_l(&ct->c1, e));
-
-  // m xor L(e0, e1)
-  for(size_t i = 0; i < sizeof(*m); i++) {
-    ct->c1.raw[i] ^= m->raw[i];
-  }
-
-  print("e0: ", (const uint64_t *)PE0_RAW(e), R_BITS);
-  print("e1: ", (const uint64_t *)PE1_RAW(e), R_BITS);
-  print("c0:  ", (uint64_t *)ct->c0.raw, R_BITS);
-  print("c1:  ", (uint64_t *)ct->c1.raw, M_BITS);
-
-  return SUCCESS;
-}
-
-_INLINE_ ret_t reencrypt(OUT m_t *m, IN const pad_e_t *e, IN const ct_t *l_ct)
-{
-  DEFER_CLEANUP(m_t tmp, m_cleanup);
-
-  GUARD(function_l(&tmp, e));
-
-  // m' = c1 ^ L(e')
-  for(size_t i = 0; i < sizeof(*m); i++) {
-    m->raw[i] = tmp.raw[i] ^ l_ct->c1.raw[i];
-  }
-
-  return SUCCESS;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// The three APIs below (keypair, encapsulate, decapsulate) are defined by NIST:
-////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+//The three APIs below (keypair, enc, dec) are defined by NIST:
+//In addition there are two KAT versions of this API as defined.
+////////////////////////////////////////////////////////////////
 int keypair(OUT unsigned char *pk, OUT unsigned char *sk)
 {
-  DEFER_CLEANUP(aligned_sk_t l_sk = {0}, sk_cleanup);
+    //Convert to these implementation types
+    sk_t* l_sk = (sk_t*)sk;
+    pk_t* l_pk = (pk_t*)pk;
 
-  // The secret key is (h0, h1),
-  // and the public key h=(h0^-1 * h1).
-  // Padded structures are used internally, and are required by the
-  // decoder and the gf2x multiplication.
-  DEFER_CLEANUP(pad_r_t h0 = {0}, pad_r_cleanup);
-  DEFER_CLEANUP(pad_r_t h1 = {0}, pad_r_cleanup);
-  DEFER_CLEANUP(pad_r_t h0inv = {0}, pad_r_cleanup);
-  DEFER_CLEANUP(pad_r_t h = {0}, pad_r_cleanup);
+    // return code
+    status_t res = SUCCESS;
 
-  // The randomness of the key generation
-  DEFER_CLEANUP(seeds_t seeds = {0}, seeds_cleanup);
+    //For NIST DRBG_CTR
+    double_seed_t seeds = {0};
+    shake256_prng_state_t h_prng_state = {0};
 
-  // An AES_PRF state for the secret key
-  DEFER_CLEANUP(aes_ctr_prf_state_t h_prf_state = {0}, aes_ctr_prf_state_cleanup);
+    //Get the entropy seeds
+    get_seeds(&seeds, KEYGEN_SEEDS);
 
-  get_seeds(&seeds);
-  GUARD(init_aes_ctr_prf_state(&h_prf_state, MAX_AES_INVOKATION, &seeds.seed[0]));
+    // sk = (h0, h1, sigma)
+    uint8_t * h0 = l_sk->val0;
+    uint8_t * h1 = l_sk->val1;
+    uint8_t * sigma = l_sk->sigma;
 
-  // Generate the secret key (h0, h1) with weight w/2
-  GUARD(generate_sparse_rep(&h0, l_sk.wlist[0].val, &h_prf_state));
-  GUARD(generate_sparse_rep(&h1, l_sk.wlist[1].val, &h_prf_state));
+    uint8_t inv_h0[R_SIZE] = {0};
 
-  // Generate sigma
-  convert_seed_to_m_type(&l_sk.sigma, &seeds.seed[1]);
+    DMSG("  Enter crypto_kem_keypair.\n");
+    DMSG("    Calculating the secret key.\n");
 
-  // Calculate the public key
-  gf2x_mod_inv(&h0inv, &h0);
-  gf2x_mod_mul(&h, &h1, &h0inv);
+    shake256_init(seeds.s1.raw, ELL_SIZE, &h_prng_state);
+    res = generate_sparse_rep_keccak(h0, DV, R_BITS, &h_prng_state); CHECK_STATUS(res);
+    res = generate_sparse_rep_keccak(h1, DV, R_BITS, &h_prng_state); CHECK_STATUS(res);
 
-  // Fill the secret key data structure with contents - cancel the padding
-  l_sk.bin[0] = h0.val;
-  l_sk.bin[1] = h1.val;
-  l_sk.pk     = h.val;
+    // use the second seed as sigma
+    memcpy(sigma, seeds.s2.raw, ELL_SIZE);
 
-  // Copy the data to the output buffers
-  bike_memcpy(sk, &l_sk, sizeof(l_sk));
-  bike_memcpy(pk, &l_sk.pk, sizeof(l_sk.pk));
+    DMSG("    Calculating the public key.\n");
 
-  print("h:  ", (uint64_t *)&l_sk.pk, R_BITS);
-  print("h0: ", (uint64_t *)&l_sk.bin[0], R_BITS);
-  print("h1: ", (uint64_t *)&l_sk.bin[1], R_BITS);
-  print("h0 wlist:", (uint64_t *)&l_sk.wlist[0], SIZEOF_BITS(compressed_idx_d_t));
-  print("h1 wlist:", (uint64_t *)&l_sk.wlist[1], SIZEOF_BITS(compressed_idx_d_t));
-  print("sigma: ", (uint64_t *)l_sk.sigma.raw, M_BITS);
+    // pk = (1, h1*h0^(-1)), the first pk component (1) is implicitly assumed
+    ntl_mod_inv(inv_h0, h0);
+    ntl_mod_mul(l_pk->val, h1, inv_h0);
 
-  return SUCCESS;
+    EDMSG("h0: "); print((uint64_t*)l_sk->val0, R_BITS);
+    EDMSG("h1: "); print((uint64_t*)l_sk->val1, R_BITS);
+    EDMSG("h: "); print((uint64_t*)l_pk->val, R_BITS);
+    EDMSG("sigma: "); print((uint64_t*)l_sk->sigma, ELL_BITS);
+
+    EXIT:
+    DMSG("  Exit crypto_kem_keypair.\n");
+    return res;
 }
 
-// Encapsulate - pk is the public key,
-//               ct is a key encapsulation message (ciphertext),
-//               ss is the shared secret.
-int encaps(OUT unsigned char *     ct,
-           OUT unsigned char *     ss,
-           IN const unsigned char *pk)
+//Encapsulate - pk is the public key,
+//              ct is a key encapsulation message (ciphertext),
+//              ss is the shared secret.
+int encaps(OUT unsigned char *ct,
+        OUT unsigned char *ss,
+        IN  const unsigned char *pk)
 {
-  // Public values (they do not require cleanup on exit).
-  pk_t l_pk;
-  ct_t l_ct;
+    DMSG("  Enter crypto_kem_enc.\n");
 
-  DEFER_CLEANUP(m_t m, m_cleanup);
-  DEFER_CLEANUP(ss_t l_ss, ss_cleanup);
-  DEFER_CLEANUP(seeds_t seeds = {0}, seeds_cleanup);
-  DEFER_CLEANUP(pad_e_t e, pad_e_cleanup);
+    status_t res = SUCCESS;
 
-  // Copy the data from the input buffer. This is required in order to avoid
-  // alignment issues on non x86_64 processors.
-  bike_memcpy(&l_pk, pk, sizeof(l_pk));
+    //Convert to these implementation types
+    const pk_t* l_pk = (pk_t*)pk;
+    ct_t* l_ct = (ct_t*)ct;
+    ss_t* l_ss = (ss_t*)ss;
 
-  get_seeds(&seeds);
+    //For NIST DRBG_CTR.
+    double_seed_t seeds = {0};
 
-  // e = H(m) = H(seed[0])
-  convert_seed_to_m_type(&m, &seeds.seed[0]);
-  GUARD(function_h(&e, &m));
+    //Get the entropy seeds.
+    get_seeds(&seeds, ENCAPS_SEEDS);
 
-  // Calculate the ciphertext
-  GUARD(encrypt(&l_ct, &e, &l_pk, &m));
+    // quantity m:
+    uint8_t m[ELL_SIZE] = {0};
 
-  // Generate the shared secret
-  GUARD(function_k(&l_ss, &m, &l_ct));
+    // error vector:
+    uint8_t e[N_SIZE] = {0};
+    uint8_t e0[R_SIZE] = {0};
+    uint8_t e1[R_SIZE] = {0};
 
-  print("ss: ", (uint64_t *)l_ss.raw, SIZEOF_BITS(l_ss));
+    // temporary buffer:
+    uint8_t tmp[ELL_SIZE] = {0};
 
-  // Copy the data to the output buffers
-  bike_memcpy(ct, &l_ct, sizeof(l_ct));
-  bike_memcpy(ss, &l_ss, sizeof(l_ss));
+    //random data generator; Using seed s1
+    memcpy(m, seeds.s1.raw, ELL_SIZE);
 
-  return SUCCESS;
+    // (e0, e1) = H(m)
+    functionH(e, m);
+    ntl_split_polynomial(e0, e1, e);
+
+    // ct = (c0, c1) = (e0 + e1*h, L(e0, e1) \XOR m)
+    ntl_mod_mul(l_ct->val0, e1, l_pk->val);
+    ntl_add(l_ct->val0, l_ct->val0, e0);
+    functionL(tmp, e);
+    for (uint32_t i = 0; i < ELL_SIZE; i++)
+        l_ct->val1[i] = tmp[i] ^ m[i];
+
+    // Function K:
+    //shared secret =  K(m || c0 || c1)
+    functionK(l_ss->raw, m, l_ct->val0, l_ct->val1);
+
+    EDMSG("ss: "); print((uint64_t*)l_ss->raw, sizeof(*l_ss)*8);
+
+    EXIT:
+
+    DMSG("  Exit crypto_kem_enc.\n");
+    return res;
 }
 
-// Decapsulate - ct is a key encapsulation message (ciphertext),
-//               sk is the private key,
-//               ss is the shared secret
-int decaps(OUT unsigned char *     ss,
-           IN const unsigned char *ct,
-           IN const unsigned char *sk)
+//Decapsulate - ct is a key encapsulation message (ciphertext),
+//              sk is the private key,
+//              ss is the shared secret
+int decaps(OUT unsigned char *ss,
+        IN const unsigned char *ct,
+        IN const unsigned char *sk)
 {
-  // Public values, does not require a cleanup on exit
-  ct_t l_ct;
+    DMSG("  Enter crypto_kem_dec.\n");
+    status_t res = SUCCESS;
 
-  DEFER_CLEANUP(seeds_t seeds = {0}, seeds_cleanup);
+    // convert to this implementation types
+    const sk_t* l_sk = (sk_t*)sk;
+    const ct_t* l_ct = (ct_t*)ct;
+    ss_t* l_ss = (ss_t*)ss;
 
-  DEFER_CLEANUP(ss_t l_ss, ss_cleanup);
-  DEFER_CLEANUP(aligned_sk_t l_sk, sk_cleanup);
-  DEFER_CLEANUP(e_t e, e_cleanup);
-  DEFER_CLEANUP(m_t m_prime, m_cleanup);
-  DEFER_CLEANUP(pad_e_t e_tmp, pad_e_cleanup);
-  DEFER_CLEANUP(pad_e_t e_prime, pad_e_cleanup);
+    int failed = 0;
 
-  // Copy the data from the input buffers. This is required in order to avoid
-  // alignment issues on non x86_64 processors.
-  bike_memcpy(&l_ct, ct, sizeof(l_ct));
-  bike_memcpy(&l_sk, sk, sizeof(l_sk));
+    // for NIST DRBG_CTR
+    double_seed_t seeds = {0};
+  
+    uint8_t e_recomputed[N_SIZE] = {0};
 
-  // Generate a random error vector to be used in case of decoding failure
-  // (Note: possibly, a "fixed" zeroed error vector could suffice too,
-  // and serve this generation)
-  get_seeds(&seeds);
-  GUARD(generate_error_vector(&e_prime, &seeds.seed[0]));
+    uint8_t Le0e1[ELL_SIZE + 2*R_SIZE] = {0};
+    uint8_t m_prime[ELL_SIZE] = {0};
 
-  // Decode and on success check if |e|=T (all in constant-time)
-  volatile uint32_t success_cond = (decode(&e, &l_ct, &l_sk) == SUCCESS);
-  success_cond &= secure_cmp32(T, r_bits_vector_weight(&e.val[0]) +
-                                    r_bits_vector_weight(&e.val[1]));
+    uint32_t h0_compact[DV] = {0};
+    uint32_t h1_compact[DV] = {0};
 
-  // Set appropriate error based on the success condition
-  uint8_t mask = ~secure_l32_mask(0, success_cond);
-  for(size_t i = 0; i < R_BYTES; i++) {
-    PE0_RAW(&e_prime)[i] &= u8_barrier(~mask);
-    PE0_RAW(&e_prime)[i] |= (u8_barrier(mask) & E0_RAW(&e)[i]);
-    PE1_RAW(&e_prime)[i] &= u8_barrier(~mask);
-    PE1_RAW(&e_prime)[i] |= (u8_barrier(mask) & E1_RAW(&e)[i]);
-  }
+    uint8_t e_prime[N_SIZE] = {0};
+    uint8_t e_twoprime[R_BITS*2] = {0};
+   
+    uint8_t e_tmp1[R_BITS*2] = {0};
+    uint8_t e_tmp2[N_SIZE] = {0};
 
-  GUARD(reencrypt(&m_prime, &e_prime, &l_ct));
+    uint8_t e0rand[R_SIZE] = {0};
+    uint8_t e1rand[R_SIZE] = {0};
 
-  // Check if H(m') is equal to (e0', e1')
-  // (in constant-time)
-  GUARD(function_h(&e_tmp, &m_prime));
-  success_cond = secure_cmp(PE0_RAW(&e_prime), PE0_RAW(&e_tmp), R_BYTES);
-  success_cond &= secure_cmp(PE1_RAW(&e_prime), PE1_RAW(&e_tmp), R_BYTES);
+    int rc;
 
-  // Compute either K(m', C) or K(sigma, C) based on the success condition
-  mask = secure_l32_mask(0, success_cond);
-  for(size_t i = 0; i < M_BYTES; i++) {
-    m_prime.raw[i] &= u8_barrier(~mask);
-    m_prime.raw[i] |= (u8_barrier(mask) & l_sk.sigma.raw[i]);
-  }
+    DMSG("  Converting to compact rep.\n");
+    convert2compact(h0_compact, l_sk->val0);
+    convert2compact(h1_compact, l_sk->val1);
 
-  // Generate the shared secret
-  GUARD(function_k(&l_ss, &m_prime, &l_ct));
+    DMSG("  Computing s.\n");
+    syndrome_t syndrome;
 
-  // Copy the data into the output buffer
-  bike_memcpy(ss, &l_ss, sizeof(l_ss));
+       // Step 1. computing syndrome:
+    res = compute_syndrome(&syndrome, l_ct, l_sk); CHECK_STATUS(res);
 
-  return SUCCESS;
+    // Step 2. decoding:
+    DMSG("  Decoding.\n");
+    rc = BGF_decoder(e_tmp1, syndrome.raw, h0_compact, h1_compact);
+
+    convertBinaryToByte(e_prime, e_tmp1, 2*R_BITS);
+
+    // Step 3. compute L(e0 || e1)
+    functionL(Le0e1, e_prime);
+
+    // Step 4. retrieve m' = c1 \xor L(e0 || e1)
+    for(uint32_t i = 0; i < ELL_SIZE; i++)
+    {
+        m_prime[i] = l_ct->val1[i] ^ Le0e1[i];
+    }
+
+    // Step 5. (e0, e1) = H(m)
+    functionH(e_recomputed, m_prime);
+
+    if (!safe_cmp(e_recomputed, e_prime, N_SIZE))
+    {
+        DMSG("recomputed error vector does not match decoded error vector\n");
+        failed = 1;
+    }
+
+    // Step 6. compute shared secret k = K()
+    if (failed) {
+        // shared secret = K(sigma || c0 || c1)
+        functionK(l_ss->raw, l_sk->sigma, l_ct->val0, l_ct->val1);
+    }
+    else
+    {
+       // shared secret = K(m' || c0 || c1)
+        functionK(l_ss->raw, m_prime, l_ct->val0, l_ct->val1);
+    }
+
+    EXIT:
+
+    DMSG("  Exit crypto_kem_dec.\n");
+    return res;
 }
+

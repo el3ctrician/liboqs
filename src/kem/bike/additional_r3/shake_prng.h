@@ -35,59 +35,41 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  ******************************************************************************/
 
-#ifndef _UTILITIES_H_
-#define _UTILITIES_H_
+#ifndef __SHAKE_H_INCLUDED__
+#define __SHAKE_H_INCLUDED__
 
 #include "types.h"
 
-//Printing values in Little Endian
-void print_LE(IN const uint64_t *in, IN const uint32_t bits_num);
+#define SHAKE256_BLOCK_SIZE 136ULL
+#define SHAKE256_STATE_SIZE 200ULL
 
-//Printing values in Big Endian
-void print_BE(IN const uint64_t *in, IN const uint32_t bits_num);
+/* All KECCAK related functions where taken from the XKCP library
+https://github.com/XKCP/XKCP
+*/
+#define FOR(i,n) for(i=0; i<n; ++i)
+typedef unsigned char u8;
+typedef unsigned long long int u64;
+typedef unsigned int ui;
 
-//Printing number is required only in verbose level 2 or above.
-#if VERBOSE==2
-#ifdef PRINT_IN_BE
-//Print in Big Endian
-#define print(in, bits_num) print_BE(in, bits_num)
-#else
-//Print in Little Endian
-#define print(in, bits_num) print_LE(in, bits_num)
-#endif
-#else
-//No prints at all
-#define print(in, bits_num)
-#endif
+void KeccakF1600(void *s);
 
-//Comparing value in a constant time manner.
-_INLINE_ uint32_t safe_cmp(IN const uint8_t* a,
-        IN const uint8_t* b,
-        IN const uint32_t size)
+
+//////////////////////////////
+//        Types
+/////////////////////////////
+
+typedef struct shake256_prng_state_s
 {
-    volatile uint8_t res = 0;
+    uint8_t buffer[SHAKE256_STATE_SIZE];
+    uint8_t pos;
+} shake256_prng_state_t;
 
-    for(uint32_t i=0; i < size; ++i)
-    {
-        res |= (a[i] ^ b[i]);
-    }
+//////////////////////////////
+//        Methods
+/////////////////////////////
 
-    return (res == 0);
-}
+void shake256_init(const u8 *in, u64 inLen, shake256_prng_state_t *s);
+void shake256_squeeze(shake256_prng_state_t *s);
+status_t shake256_prng(OUT uint8_t* a, IN shake256_prng_state_t* s, IN const uint32_t len);
 
-//BSR returns ceil(log2(val))
-_INLINE_ uint8_t bit_scan_reverse(uint64_t val)
-{
-    //index is always smaller than 64.
-    uint8_t index = 0;
-
-    while(val != 0)
-    {
-        val >>= 1;
-        index++;
-    }
-
-    return index;
-}
-
-#endif //_UTILITIES_H_
+#endif //__SHAKE_H_INCLUDED

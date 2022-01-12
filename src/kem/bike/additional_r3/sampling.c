@@ -1,180 +1,129 @@
-/* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0"
+/******************************************************************************
+ * BIKE -- Bit Flipping Key Encapsulation
  *
- * Written by Nir Drucker, Shay Gueron and Dusan Kostic,
- * AWS Cryptographic Algorithms Group.
- */
-
-#include <assert.h>
+ * Copyright (c) 2021 Nir Drucker, Shay Gueron, Rafael Misoczki, Tobias Oder,
+ * Tim Gueneysu, Jan Richter-Brockmann.
+ * Contact: drucker.nir@gmail.com, shay.gueron@gmail.com,
+ * rafaelmisoczki@google.com, tobias.oder@rub.de, tim.gueneysu@rub.de,
+ * jan.richter-brockmann@rub.de.
+ *
+ * Permission to use this code for BIKE is granted.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * * Redistributions of source code must retain the above copyright notice,
+ *   this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the distribution.
+ *
+ * * The names of the contributors may not be used to endorse or promote
+ *   products derived from this software without specific prior written
+ *   permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ""AS IS"" AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS CORPORATION OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
 
 #include "sampling.h"
-#include "sampling_internal.h"
-#include <oqs/rand.h>
 
-// SIMD implementation of is_new function requires the size of wlist
-// to be a multiple of the number of DWORDS in a SIMD register (REG_DWORDS).
-// The function is used both for generating D and T random numbers so we define
-// two separate macros.
-#define AVX512_REG_DWORDS (16)
-#define WLIST_SIZE_ADJUSTED_D \
-  (AVX512_REG_DWORDS * DIVIDE_AND_CEIL(D, AVX512_REG_DWORDS))
-#define WLIST_SIZE_ADJUSTED_T \
-  (AVX512_REG_DWORDS * DIVIDE_AND_CEIL(T, AVX512_REG_DWORDS))
-
-void get_seeds(OUT seeds_t *seeds)
+_INLINE_ uint32_t count_ones(IN const uint8_t* a,
+        IN const uint32_t len)
 {
-  OQS_randombytes((uint8_t *)seeds, NUM_OF_SEEDS * sizeof(seed_t));
+    uint32_t count = 0;
 
-  for(uint32_t i = 0; i < NUM_OF_SEEDS; ++i) {
-    print("s: ", (uint64_t *)&seeds->seed[i], SIZEOF_BITS(seed_t));
-  }
-}
-
-// BSR returns ceil(log2(val))
-_INLINE_ uint8_t bit_scan_reverse_vartime(IN uint64_t val)
-{
-  // index is always smaller than 64
-  uint8_t index = 0;
-
-  while(val != 0) {
-    val >>= 1;
-    index++;
-  }
-
-  return index;
-}
-
-_INLINE_ ret_t get_rand_mod_len(OUT uint32_t *    rand_pos,
-                                IN const uint32_t len,
-                                IN OUT aes_ctr_prf_state_t *prf_state)
-{
-  const uint64_t mask = MASK(bit_scan_reverse_vartime(len));
-
-  do {
-    // Generate a 32 bits (pseudo) random value.
-    // This can be optimized to take only 16 bits.
-    GUARD(aes_ctr_prf((uint8_t *)rand_pos, prf_state, sizeof(*rand_pos)));
-
-    // Mask relevant bits only
-    (*rand_pos) &= mask;
-
-    // Break if a number that is smaller than len is found
-    if((*rand_pos) < len) {
-      break;
+    for(uint32_t i = 0; i < len; i++)
+    {
+        count += __builtin_popcountll(a[i]);
     }
 
-  } while(1 == 1);
-
-  return SUCCESS;
+    return count;
 }
 
-_INLINE_ void make_odd_weight(IN OUT r_t *r)
+
+status_t get_rand_mod_len_keccak(OUT uint32_t* rand_pos,
+        IN const uint32_t len,
+        IN OUT shake256_prng_state_t* prf_state)
 {
-  if(((r_bits_vector_weight(r) % 2) == 1)) {
-    // Already odd
-    return;
-  }
+    const uint64_t mask = MASK(bit_scan_reverse(len));
+    status_t res = SUCCESS;
 
-  r->raw[0] ^= 1;
+    do
+    {
+        //Generate 128bit of random numbers
+        res = shake256_prng((uint8_t*) rand_pos, prf_state, sizeof(*rand_pos));
+
+        //Mask only relevant bits
+        (*rand_pos) &= mask;
+
+        //Break if a number smaller than len is found.
+        if ((*rand_pos) < len)
+        {
+            break;
+        }
+
+    } while (1==1);
+
+
+    EXIT:
+    return res;
 }
 
-// Returns an array of r pseudorandom bits.
-// No restrictions exist for the top or bottom bits.
-// If the generation requires an odd number, then set must_be_odd=1.
-// The function uses the provided prf context.
-ret_t sample_uniform_r_bits_with_fixed_prf_context(
-  OUT r_t *r,
-  IN OUT aes_ctr_prf_state_t *prf_state,
-  IN const must_be_odd_t      must_be_odd)
+void setZero(uint8_t * r, uint32_t length)
 {
-  // Generate random data
-  GUARD(aes_ctr_prf(r->raw, prf_state, R_BYTES));
-
-  // Mask upper bits of the MSByte
-  r->raw[R_BYTES - 1] &= MASK(R_BITS + 8 - (R_BYTES * 8));
-
-  if(must_be_odd == MUST_BE_ODD) {
-    make_odd_weight(r);
-  }
-
-  return SUCCESS;
+    for (uint32_t i = 0; i < length; i++)
+        r[i] = 0;
+}
+int CHECK_BIT(uint8_t * tmp, int position) {
+    int index = position/8;
+    int pos = position%8;
+    return ((tmp[index] >> (pos))  & 0x01);
+}
+void SET_BIT(uint8_t * tmp, int position) {
+    int index = position/8;
+    int pos = position%8;
+    tmp[index] |= 1UL << (pos);
 }
 
-_INLINE_ ret_t generate_indices_mod_z(OUT idx_t *     out,
-                             IN const size_t num_indices,
-                             IN const size_t z,
-                             IN OUT aes_ctr_prf_state_t *prf_state,
-                             IN const sampling_ctx *ctx)
+
+status_t generate_sparse_rep_keccak(OUT uint8_t * r,
+        IN  const uint32_t weight,
+        IN  const uint32_t len,
+        IN OUT shake256_prng_state_t *prf_state)
 {
-  size_t ctr = 0;
+    uint32_t rand_pos = 0;
+    status_t res = SUCCESS;
+    uint64_t ctr      = 0;
 
-  // Generate num_indices unique (pseudo) random numbers modulo z
-  do {
-    GUARD(get_rand_mod_len(&out[ctr], z, prf_state));
-    ctr += ctx->is_new(out, ctr);
-  } while(ctr < num_indices);
+    //Ensure r is zero.
+    setZero(r, DIVIDE_AND_CEIL(len, 8ULL));
 
-  return SUCCESS;
+    do
+    {
+        res = get_rand_mod_len_keccak(&rand_pos, len, prf_state);
+        CHECK_STATUS(res);
+
+
+        if (!CHECK_BIT(r, rand_pos))
+        {
+            ctr++;
+            //No collision set the bit
+            SET_BIT(r, rand_pos);
+
+        }
+    } while(ctr != weight);
+
+    EXIT:
+    return res;
 }
 
-// Returns an array of r pseudorandom bits.
-// No restrictions exist for the top or bottom bits.
-// If the generation requires an odd number, then set must_be_odd = MUST_BE_ODD
-ret_t sample_uniform_r_bits(OUT r_t *r,
-                            IN const seed_t *      seed,
-                            IN const must_be_odd_t must_be_odd)
-{
-  // For the seedexpander
-  DEFER_CLEANUP(aes_ctr_prf_state_t prf_state = {0}, aes_ctr_prf_state_cleanup);
-
-  GUARD(init_aes_ctr_prf_state(&prf_state, MAX_AES_INVOKATION, seed));
-
-  GUARD(sample_uniform_r_bits_with_fixed_prf_context(r, &prf_state, must_be_odd));
-
-  return SUCCESS;
-}
-
-ret_t generate_sparse_rep(OUT pad_r_t *r,
-                          OUT idx_t *wlist,
-                          IN OUT aes_ctr_prf_state_t *prf_state)
-{
-
-  // Initialize the sampling context
-  sampling_ctx ctx;
-  sampling_ctx_init(&ctx);
-
-  idx_t wlist_temp[WLIST_SIZE_ADJUSTED_D] = {0};
-
-  GUARD(generate_indices_mod_z(wlist_temp, D, R_BITS, prf_state, &ctx));
-
-  bike_memcpy(wlist, wlist_temp, D * sizeof(idx_t));
-  ctx.secure_set_bits(r, 0, wlist, D);
-
-  return SUCCESS;
-}
-
-ret_t generate_error_vector(OUT pad_e_t *e, IN const seed_t *seed)
-{
-  DEFER_CLEANUP(aes_ctr_prf_state_t prf_state = {0}, aes_ctr_prf_state_cleanup);
-
-  GUARD(init_aes_ctr_prf_state(&prf_state, MAX_AES_INVOKATION, seed));
-
-  // Initialize the sampling context
-  sampling_ctx ctx;
-  sampling_ctx_init(&ctx);
-
-  idx_t wlist[WLIST_SIZE_ADJUSTED_T] = {0};
-  GUARD(generate_indices_mod_z(wlist, T, N_BITS, &prf_state, &ctx));
-
-  // (e0, e1) hold bits 0..R_BITS-1 and R_BITS..2*R_BITS-1 of the error, resp.
-  ctx.secure_set_bits(&e->val[0], 0, wlist, T);
-  ctx.secure_set_bits(&e->val[1], R_BITS, wlist, T);
-
-  // Clean the padding of the elements
-  PE0_RAW(e)[R_BYTES - 1] &= LAST_R_BYTE_MASK;
-  PE1_RAW(e)[R_BYTES - 1] &= LAST_R_BYTE_MASK;
-  bike_memset(&PE0_RAW(e)[R_BYTES], 0, R_PADDED_BYTES - R_BYTES);
-  bike_memset(&PE1_RAW(e)[R_BYTES], 0, R_PADDED_BYTES - R_BYTES);
-
-  return SUCCESS;
-}

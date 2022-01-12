@@ -1,120 +1,202 @@
-/* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0"
+/******************************************************************************
+ * BIKE -- Bit Flipping Key Encapsulation
  *
- * Written by Nir Drucker, Shay Gueron and Dusan Kostic,
- * AWS Cryptographic Algorithms Group.
- */
+ * Copyright (c) 2021 Nir Drucker, Shay Gueron, Rafael Misoczki, Tobias Oder,
+ * Tim Gueneysu, Jan Richter-Brockmann.
+ * Contact: drucker.nir@gmail.com, shay.gueron@gmail.com,
+ * rafaelmisoczki@google.com, tobias.oder@rub.de, tim.gueneysu@rub.de,
+ * jan.richter-brockmann@rub.de.
+ *
+ * Permission to use this code for BIKE is granted.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * * Redistributions of source code must retain the above copyright notice,
+ *   this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the distribution.
+ *
+ * * The names of the contributors may not be used to endorse or promote
+ *   products derived from this software without specific prior written
+ *   permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ""AS IS"" AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS CORPORATION OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
 
-#pragma once
+#ifndef __TYPES_H_INCLUDED__
+#define __TYPES_H_INCLUDED__
 
-#include <stddef.h>
+#include "defs.h"
 #include <stdint.h>
+#include <stddef.h>
 
-#include "bike_defs.h"
-#include "error.h"
+/* type definitions used in backflip decoder: */
+typedef uint8_t bit_t;
+typedef uint16_t index_t;
+typedef struct ring_buffer *ring_buffer_t;
+typedef struct parameters *parameters_t;
+typedef struct decoder *decoder_t;
 
-typedef struct uint128_s {
-  union {
-    uint8_t  bytes[16]; // NOLINT
-    uint32_t dw[4];     // NOLINT
-    uint64_t qw[2];     // NOLINT
-  } u;
+/* Implement the backflip flipping queue as a ring buffer */
+struct ring_buffer {
+    index_t *raw_ptr_index;
+    index_t *start_ptr_index;
+    index_t *raw_ptr_position;
+    index_t *start_ptr_position;
+    /* Extra information on a position that might be useful */
+    int *raw_ptr_extra;
+    int *start_ptr_extra;
+    size_t size;
+    size_t start_idx;
+    size_t length;
+};
+
+typedef struct uint128_s
+{
+    union
+    {
+        uint8_t bytes[16];
+        uint32_t dwords[4];
+        uint64_t qwords[2];
+    };
 } uint128_t;
 
-// Make sure no compiler optimizations.
+//For clarity of the code.
+#define IN
+#define OUT
+
+//Bit manipulations
+#define BIT(len) (1ULL << (len))
+#define MASK(len) (BIT(len) - 1ULL)
+
+#define _INLINE_ static inline
+
+//Make sure no compiler optimizations.
 #pragma pack(push, 1)
 
-typedef struct seed_s {
-  uint8_t raw[SEED_BYTES];
-} seed_t;
+typedef struct pk_buffer
+{
+    union
+    {
+      struct
+      {
+        uint8_t val[R_SIZE];
+      };
+      uint8_t raw[R_SIZE];
+    };
+} pk_buffer_t;
 
-typedef struct seeds_s {
-  seed_t seed[NUM_OF_SEEDS];
-} seeds_t;
+typedef struct ct_buffer
+{
+    union
+    {
+      struct
+      {
+        uint8_t val0[R_SIZE];
+        uint8_t val1[ELL_SIZE];
+      };
+      uint8_t raw[R_SIZE+ELL_SIZE];
+    };
+} ct_buffer_t;
 
-typedef struct r_s {
-  uint8_t raw[R_BYTES];
-} r_t;
+typedef ct_buffer_t ct_t;
 
-typedef struct m_s {
-  uint8_t raw[M_BYTES];
-} m_t;
+typedef pk_buffer_t pk_t;
 
-typedef struct e_s {
-  r_t val[N0];
-} e_t;
+typedef struct sk_buffer
+{
+    union
+    {
+      struct
+      {
+        uint8_t val0[R_SIZE];
+        uint8_t val1[R_SIZE];
+      };
+      uint8_t raw[2*R_SIZE];
+    };
+    uint8_t sigma[ELL_SIZE];
+} sk_buffer_t;
 
-#define E0_RAW(e) ((e)->val[0].raw)
-#define E1_RAW(e) ((e)->val[1].raw)
+typedef sk_buffer_t sk_t;
 
-typedef struct ct_s {
-  r_t c0;
-  m_t c1;
-} ct_t;
-
-typedef r_t pk_t;
-
-typedef struct ss_st {
-  uint8_t raw[SS_BYTES];
+typedef struct ss_s
+{
+    uint8_t raw[ELL_SIZE];
 } ss_t;
 
-typedef uint32_t idx_t;
+typedef struct syndrome_s
+{
+    uint8_t raw[R_BITS];
+} syndrome_t;
 
-typedef struct compressed_idx_d_s {
-  idx_t val[D];
-} compressed_idx_d_t;
+enum _seed_id
+{
+    G_SEED = 0,
+    H_SEED = 1,
+    M_SEED = 2,
+    E_SEED = 3
+};
 
-typedef compressed_idx_d_t compressed_idx_d_ar_t[N0];
+typedef struct seed_s
+{
+    union {
+        uint8_t  raw[32];
+        uint64_t qwords[4];
+    };
+} seed_t;
 
-// The secret key holds both representations, to avoid
-// the compression in Decaps.
-typedef struct sk_s {
-  compressed_idx_d_ar_t wlist;
-  r_t                   bin[N0];
-  pk_t                  pk;
-  m_t                   sigma;
-} sk_t;
+//Both keygen and encaps require double seed.
+typedef struct double_seed_s
+{
+    union {
+        struct {
+            seed_t s1;
+            seed_t s2;
+        };
+        uint8_t raw[sizeof(seed_t) * 2ULL];
+    };
+} double_seed_t;
 
-typedef ALIGN(sizeof(idx_t)) sk_t aligned_sk_t;
+//////////////////////////////
+//   Error handling
+/////////////////////////////
 
-// Pad r to the next Block
-typedef struct pad_r_s {
-  r_t     val;
-  uint8_t pad[R_PADDED_BYTES - sizeof(r_t)];
-} ALIGN(ALIGN_BYTES) pad_r_t;
+//This convention will work all over the code.
+#define ERR(v) {res = v; goto EXIT;}
+#define CHECK_STATUS(stat) {if(stat != SUCCESS) {goto EXIT;}}
 
-// Double padded r, required for multiplication and squaring
-typedef struct dbl_pad_r_s {
-  uint8_t raw[2 * R_PADDED_BYTES];
-} ALIGN(ALIGN_BYTES) dbl_pad_r_t;
+enum _status
+{
+    SUCCESS                          = 0,
+    E_FAIL_TO_DECODE                 = 1,
+    E_OSSL_FAILURE                   = 2,
+    E_FAIL_TO_PERFORM_CYCLIC_PRODUCT = 3,
+    E_FAIL_TO_PERFORM_ADD            = 4,
+    E_FAIL_TO_SPLIT                  = 5,
+    E_AES_SET_KEY_FAIL               = 6,
+    E_ERROR_WEIGHT_IS_NOT_T          = 7,
+    E_DECODING_FAILURE               = 8,
+    E_AES_CTR_PRF_INIT_FAIL          = 9,
+    E_AES_OVER_USED                  = 10,
+    E_SHA384_FAIL                    = 11,
+    E_SHAKE128_FAIL                  = 12
+};
 
-typedef struct pad_e_s {
-  pad_r_t val[N0];
-} ALIGN(ALIGN_BYTES) pad_e_t;
-
-#define PE0_RAW(e) ((e)->val[0].val.raw)
-#define PE1_RAW(e) ((e)->val[1].val.raw)
-
-typedef struct func_k_s {
-  m_t m;
-  r_t c0;
-  m_t c1;
-} func_k_t;
-
-// For a faster rotate we triplicate the syndrome (into 3 copies)
-typedef struct syndrome_s {
-  uint64_t qw[3 * R_QWORDS];
-} ALIGN(ALIGN_BYTES) syndrome_t;
-
-typedef struct upc_slice_s {
-  union {
-    pad_r_t  r;
-    uint64_t qw[sizeof(pad_r_t) / sizeof(uint64_t)];
-  } ALIGN(ALIGN_BYTES) u;
-} ALIGN(ALIGN_BYTES) upc_slice_t;
-
-typedef struct upc_s {
-  upc_slice_t slice[SLICES];
-} upc_t;
+typedef enum _status status_t;
 
 #pragma pack(pop)
+
+#endif //__TYPES_H_INCLUDED__
+

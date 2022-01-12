@@ -35,59 +35,43 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  ******************************************************************************/
 
-#ifndef _UTILITIES_H_
-#define _UTILITIES_H_
+#include "hash_wrapper.h"
+#include "utilities.h"
+#include "openssl/sha.h"
+#include "string.h"
+#include "stdio.h"
 
-#include "types.h"
+#include <openssl/evp.h>
 
-//Printing values in Little Endian
-void print_LE(IN const uint64_t *in, IN const uint32_t bits_num);
 
-//Printing values in Big Endian
-void print_BE(IN const uint64_t *in, IN const uint32_t bits_num);
+/*
+Wrapper for SHA3-384 from openssl
+*/
+void sha3_384(unsigned char* output, const unsigned char* input, uint64_t size){
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    unsigned int s;
+    int check;
+    status_t res = SUCCESS;
 
-//Printing number is required only in verbose level 2 or above.
-#if VERBOSE==2
-#ifdef PRINT_IN_BE
-//Print in Big Endian
-#define print(in, bits_num) print_BE(in, bits_num)
-#else
-//Print in Little Endian
-#define print(in, bits_num) print_LE(in, bits_num)
-#endif
-#else
-//No prints at all
-#define print(in, bits_num)
-#endif
+    // determine type
+    const EVP_MD* md = EVP_sha3_384();
+    if(md == NULL) res = E_SHA384_FAIL; CHECK_STATUS(res);
 
-//Comparing value in a constant time manner.
-_INLINE_ uint32_t safe_cmp(IN const uint8_t* a,
-        IN const uint8_t* b,
-        IN const uint32_t size)
-{
-    volatile uint8_t res = 0;
+    // DigistInit
+    check = EVP_DigestInit_ex(ctx, md, NULL);
+    if(check == 0) res = E_SHA384_FAIL; CHECK_STATUS(res);
 
-    for(uint32_t i=0; i < size; ++i)
-    {
-        res |= (a[i] ^ b[i]);
-    }
+    // digist update
+    check = EVP_DigestUpdate(ctx, input, size);
+    if(check == 0) res = E_SHA384_FAIL; CHECK_STATUS(res);
 
-    return (res == 0);
+    // digist final
+    check = EVP_DigestFinal(ctx, output, &s);
+    if(check == 0) res = E_SHA384_FAIL; CHECK_STATUS(res);
+
+    // clean up
+    EVP_MD_CTX_free(ctx);
+
+    EXIT:
+    DMSG("  Exit SHA3-384.\n");
 }
-
-//BSR returns ceil(log2(val))
-_INLINE_ uint8_t bit_scan_reverse(uint64_t val)
-{
-    //index is always smaller than 64.
-    uint8_t index = 0;
-
-    while(val != 0)
-    {
-        val >>= 1;
-        index++;
-    }
-
-    return index;
-}
-
-#endif //_UTILITIES_H_

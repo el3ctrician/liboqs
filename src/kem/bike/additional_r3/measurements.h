@@ -1,87 +1,115 @@
-/* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- * SPDX-License-Identifier: Apache-2.0"
+/******************************************************************************
+ * BIKE -- Bit Flipping Key Encapsulation
  *
- * Written by Nir Drucker, Shay Gueron and Dusan Kostic,
- * AWS Cryptographic Algorithms Group.
- */
+ * Copyright (c) 2021 Nir Drucker, Shay Gueron, Rafael Misoczki, Tobias Oder,
+ * Tim Gueneysu, Jan Richter-Brockmann.
+ * Contact: drucker.nir@gmail.com, shay.gueron@gmail.com,
+ * rafaelmisoczki@google.com, tobias.oder@rub.de, tim.gueneysu@rub.de,
+ * jan.richter-brockmann@rub.de.
+ *
+ * Permission to use this code for BIKE is granted.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * * Redistributions of source code must retain the above copyright notice,
+ *   this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the distribution.
+ *
+ * * The names of the contributors may not be used to endorse or promote
+ *   products derived from this software without specific prior written
+ *   permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ""AS IS"" AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS CORPORATION OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
 
-#pragma once
 
-#if !defined(RDTSC)
-#  define MEASURE(msg, x) \
-    do {                  \
-      x                   \
-    } while(0)
-#else
+#ifndef MEASURE_H
+#define MEASURE_H
 
-#  include <float.h>
-#  include <stdint.h>
+#ifndef RDTSC
+//Less accurate measurement than with RDTSC
+#include <time.h>
+clock_t start;
+clock_t end;
 
-// This part defines the functions and macros needed to measure using RDTSC
-#  if !defined(REPEAT)
-#    define REPEAT 100
-#  endif
+#define MEASURE(msg, x) start = clock(); {x}; end = clock(); \
+        printf(msg); \
+        printf("\ttook %lfs\n", ((double) (end-start)/CLOCKS_PER_SEC));
+#endif
 
-#  if !defined(OUTER_REPEAT)
-#    define OUTER_REPEAT 10
-#  endif
+/* This part defines the functions and MACROS needed to measure using RDTSC */
+#ifdef RDTSC
 
-#  if !defined(WARMUP)
-#    define WARMUP (REPEAT / 4)
-#  endif
+#ifndef REPEAT
+#define REPEAT 100
+#endif
 
-uint64_t               start_clk, end_clk;
-double                 total_clk;
-double                 temp_clk;
-size_t                 rdtsc_itr;
-size_t                 rdtsc_outer_itr;
+#ifndef OUTER_REPEAT
+#define OUTER_REPEAT 1
+#endif
 
-#  define HALF_GPR_SIZE UINT8_C(32)
+#ifndef WARMUP
+#define WARMUP REPEAT/4
+#endif
 
-#  if defined(X86_64)
-inline static uint64_t get_cycles(void)
+unsigned long long RDTSC_start_clk, RDTSC_end_clk;
+double RDTSC_total_clk;
+double RDTSC_TEMP_CLK;
+int RDTSC_MEASURE_ITERATOR;
+int RDTSC_OUTER_ITERATOR;
+
+inline static uint64_t get_Clks(void)
 {
-  uint64_t hi;
-  uint64_t lo;
-  __asm__ __volatile__("rdtscp\n\t" : "=a"(lo), "=d"(hi)::"rcx");
-  return lo ^ (hi << HALF_GPR_SIZE);
+    unsigned hi, lo;
+    __asm__ __volatile__ ("rdtscp\n\t" : "=a"(lo), "=d"(hi)::"rcx");
+    return ( (uint64_t)lo)^( ((uint64_t)hi)<<32 );
 }
-#  elif defined(AARCH64)
-inline static uint64_t get_cycles(void)
-{
-  uint64_t value;
-  __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(value));
-  return value;
-}
-#  else
-#    error "Unsupported architecture."
-#  endif
 
 /*
-This MACRO measures the number of cycles "x" runs. This is the flow:
-   1) it repeats "x" WARMUP times, in order to warm the cache.
-   2) it reads the Time Stamp Counter at the beginning of the test.
-   3) it repeats "x" REPEAT number of times.
-   4) it reads the Time Stamp Counter again at the end of the test
-   5) it calculates the average number of cycles per one iteration of "x", by
-calculating the total number of cycles, and dividing it by REPEAT
+   This MACRO measures the number of cycles "x" runs. This is the flow:
+      1) it sets the priority to FIFO, to avoid time slicing if possible.
+      2) it repeats "x" WARMUP times, in order to warm the cache.
+      3) it reads the Time Stamp Counter at the beginning of the test.
+      4) it repeats "x" REPEAT number of times.
+      5) it reads the Time Stamp Counter again at the end of the test
+      6) it calculates the average number of cycles per one iteration of "x", by calculating the total number of cycles, and dividing it by REPEAT
  */
-#  define MEASURE(msg, x)                                    \
-    for(rdtsc_itr = 0; rdtsc_itr < WARMUP; rdtsc_itr++) {    \
-      {x};                                                   \
-    }                                                        \
-    total_clk = DBL_MAX;                                     \
-    for(rdtsc_outer_itr = 0; rdtsc_outer_itr < OUTER_REPEAT; \
-        rdtsc_outer_itr++) {                                 \
-      start_clk = get_cycles();                              \
-      for(rdtsc_itr = 0; rdtsc_itr < REPEAT; rdtsc_itr++) {  \
-        {x};                                                 \
-      }                                                      \
-      end_clk  = get_cycles();                               \
-      temp_clk = (double)(end_clk - start_clk) / REPEAT;     \
-      if(total_clk > temp_clk) total_clk = temp_clk;         \
-    }                                                        \
-    printf(msg);                                             \
-    printf(" took %0.2f cycles\n", total_clk);
+#define RDTSC_MEASURE(msg, x)                                                                    \
+        for(RDTSC_MEASURE_ITERATOR=0; RDTSC_MEASURE_ITERATOR< WARMUP; RDTSC_MEASURE_ITERATOR++)          \
+        {                                                                                             \
+            {x};                                                                                       \
+        }                                                                                                \
+        RDTSC_total_clk = 1.7976931348623157e+308;                                                      \
+        for(RDTSC_OUTER_ITERATOR=0;RDTSC_OUTER_ITERATOR<OUTER_REPEAT; RDTSC_OUTER_ITERATOR++){          \
+            RDTSC_start_clk = get_Clks();                                                                 \
+            for (RDTSC_MEASURE_ITERATOR = 0; RDTSC_MEASURE_ITERATOR < REPEAT; RDTSC_MEASURE_ITERATOR++)   \
+            {                                                                                             \
+                {x};                                                                                       \
+            }                                                                                             \
+            RDTSC_end_clk = get_Clks();                                                                   \
+            RDTSC_TEMP_CLK = (double)(RDTSC_end_clk-RDTSC_start_clk)/REPEAT;                              \
+            if(RDTSC_total_clk>RDTSC_TEMP_CLK) RDTSC_total_clk = RDTSC_TEMP_CLK;                        \
+        } printf(msg); \
+        printf(" took %012.2f cycles in average (%d repetitions)\n", RDTSC_total_clk, REPEAT );
+
+
+#ifndef COHO
+#define MEASURE(msg, x) RDTSC_MEASURE(msg, x)
+#endif
+
+#endif
 
 #endif

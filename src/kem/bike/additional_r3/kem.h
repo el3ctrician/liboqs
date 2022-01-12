@@ -35,59 +35,60 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  ******************************************************************************/
 
-#ifndef _UTILITIES_H_
-#define _UTILITIES_H_
+#ifndef __KEM_H_INCLUDED__
+#define __KEM_H_INCLUDED__
 
-#include "types.h"
+#include "api.h"
+#include "stdlib.h"
+#include "string.h"
+#include "utilities.h"
+#include "FromNIST/rng.h"
 
-//Printing values in Little Endian
-void print_LE(IN const uint64_t *in, IN const uint32_t bits_num);
-
-//Printing values in Big Endian
-void print_BE(IN const uint64_t *in, IN const uint32_t bits_num);
-
-//Printing number is required only in verbose level 2 or above.
-#if VERBOSE==2
-#ifdef PRINT_IN_BE
-//Print in Big Endian
-#define print(in, bits_num) print_BE(in, bits_num)
-#else
-//Print in Little Endian
-#define print(in, bits_num) print_LE(in, bits_num)
-#endif
-#else
-//No prints at all
-#define print(in, bits_num)
-#endif
-
-//Comparing value in a constant time manner.
-_INLINE_ uint32_t safe_cmp(IN const uint8_t* a,
-        IN const uint8_t* b,
-        IN const uint32_t size)
+enum _seeds_purpose
 {
-    volatile uint8_t res = 0;
+    KEYGEN_SEEDS = 0,
+    ENCAPS_SEEDS = 1,
+    DECAPS_SEEDS = 2
+};
 
-    for(uint32_t i=0; i < size; ++i)
+typedef enum _seeds_purpose seeds_purpose_t;
+
+_INLINE_ void get_seeds(OUT double_seed_t* seeds, seeds_purpose_t seeds_type)
+{
+#ifdef NIST_RAND
+    randombytes(seeds->raw, sizeof(double_seed_t));
+#else
+    for(uint32_t i = 0; i < sizeof(seed_t); ++i)
     {
-        res |= (a[i] ^ b[i]);
+        seeds->s1.raw[i] = rand(); // not cryptographically secure !
+        seeds->s2.raw[i] = rand(); // not cryptographically secure !
     }
-
-    return (res == 0);
+#endif
+    EDMSG("s1: "); print(seeds->s1.qwords, sizeof(seed_t)*8);
+    EDMSG("s2: "); print(seeds->s2.qwords, sizeof(seed_t)*8);
 }
 
-//BSR returns ceil(log2(val))
-_INLINE_ uint8_t bit_scan_reverse(uint64_t val)
-{
-    //index is always smaller than 64.
-    uint8_t index = 0;
+////////////////////////////////////////////////////////////////
+//Below three APIs (keygen, encaps, decaps) are defined by NIST:
+////////////////////////////////////////////////////////////////
+//Keygenerate - pk is the public key,
+//              sk is the private key,
+int keypair(OUT unsigned char *pk, OUT unsigned char *sk);
 
-    while(val != 0)
-    {
-        val >>= 1;
-        index++;
-    }
+//Encapsulate - pk is the public key,
+//              ct is a key encapsulation message (ciphertext),
+//              ss is the shared secret.
+int encaps(OUT unsigned char *ct,
+        OUT unsigned char *ss,
+        IN const unsigned char *pk);
 
-    return index;
-}
+//Decapsulate - ct is a key encapsulation message (ciphertext),
+//              sk is the private key,
+//              ss is the shared secret
+int decaps(OUT unsigned char *ss,
+        IN const unsigned char *ct,
+        IN const unsigned char *sk);
 
-#endif //_UTILITIES_H_
+
+#endif //__KEM_H_INCLUDED__
+
