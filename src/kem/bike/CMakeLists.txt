@@ -29,10 +29,12 @@ if(OQS_ENABLE_KEM_bike_l1 OR OQS_ENABLE_KEM_bike_l3)
                 additional_r3/utilities.c)
 
     add_compile_options(-include ${CMAKE_CURRENT_LIST_DIR}/functions_renaming.h)
+    set_source_files_properties(additional_r3/ntl.cpp PROPERTIES COMPILE_FLAGS -lntl)
 
     # Round-3 KEMs
     if(OQS_ENABLE_KEM_bike_l1)
         add_library(bike_l1 OBJECT ${SRCS_R3})
+
         target_compile_definitions(bike_l1 PRIVATE LEVEL=1 FUNC_PREFIX=OQS_KEM_bike_l1 ${CPP_DEFS_R3})
         target_include_directories(bike_l1 PRIVATE ${CMAKE_CURRENT_LIST_DIR}/additional_r3)
         target_include_directories(bike_l1 PRIVATE ${CMAKE_CURRENT_LIST_DIR}/additional_r3/FromNist)

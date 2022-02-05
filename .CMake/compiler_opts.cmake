@@ -151,6 +151,10 @@ elseif(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     add_compile_options(/MT)
 endif()
 
+# add_link_options(-Wl,--whole-archive)
+add_compile_options(-ldl)
+add_compile_options(-lntl)
+
 if(MINGW OR MSYS OR CYGWIN)
     add_compile_options(-Wno-maybe-uninitialized)
     if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.13.0")
